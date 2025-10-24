@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
@@ -7,7 +8,7 @@ const WebSocket = require('ws');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const multer = require('multer');
-require('dotenv').config();
+const fs = require('fs').promises; // สำหรับจัดการไฟล์ชั่วคราว
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -19,11 +20,19 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+// ตรวจสอบการตั้งค่า Cloudinary
+if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+  console.error('Cloudinary configuration missing. Please check .env file.');
+  process.exit(1);
+}
+
+// Multer configuration
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: async (req, file) => {
     console.log('Uploading file to Cloudinary:', {
-      filename: file.originalname,
+      fieldname: file.fieldname,
+      originalname: file.originalname,
       size: file.size,
       mimetype: file.mimetype,
     });
@@ -38,8 +47,25 @@ const storage = new CloudinaryStorage({
     };
   },
 });
+
+// Multer instances
 const upload = multer({ storage }).fields([{ name: 'profileImage' }, { name: 'vehicleImage' }]);
-const orderUpload = multer({ storage }).single('productImage');
+const orderUpload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    console.log('File received in orderUpload:', {
+      fieldname: file.fieldname,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+    });
+    if (!file.mimetype.match(/image\/(jpeg|png)/)) {
+      return cb(new Error('เฉพาะไฟล์ .jpg และ .png เท่านั้น'), false);
+    }
+    cb(null, true);
+  },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+}).single('productImage');
 
 // Database configuration
 const db = mysql.createPool({
@@ -64,7 +90,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // WebSocket server
 const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`Server running at http://0.0.0.0:${port}`);
+  console.log(`Server جمعة at http://0.0.0.0:${port}`);
   console.log(`WebSocket server running at ws://0.0.0.0:${port}/ws`);
 });
 const wss = new WebSocket.Server({ server });
@@ -74,12 +100,12 @@ const clients = new Map();
 wss.on('connection', (ws, req) => {
   const riderId = req.url.split('/ws/')[1] || req.url.split('/').pop();
   console.log(`WebSocket connected for riderId: ${riderId}`);
-  
+
   if (!clients.has(riderId)) {
     clients.set(riderId, new Set());
   }
   clients.get(riderId).add(ws);
-  
+
   ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message);
@@ -87,12 +113,12 @@ wss.on('connection', (ws, req) => {
       if (latitude && longitude) {
         riderLocations.set(riderId, { latitude, longitude });
         console.log(`Updated location for rider ${riderId}: ${latitude}, ${longitude}`);
-        
+
         await db.query(
           'INSERT INTO rider_locations (rider_id, latitude, longitude) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE latitude = ?, longitude = ?, updated_at = CURRENT_TIMESTAMP',
           [riderId, latitude, longitude, latitude, longitude]
         );
-        
+
         const locationData = JSON.stringify({ latitude, longitude });
         clients.get(riderId)?.forEach(client => {
           if (client.readyState === WebSocket.OPEN) {
@@ -153,7 +179,7 @@ app.get('/get-rider-location/:riderId', async (req, res) => {
       'SELECT latitude, longitude FROM rider_locations WHERE rider_id = ? ORDER BY updated_at DESC LIMIT 1',
       [riderId]
     );
-    
+
     if (rows.length > 0) {
       console.log(`Rider ${riderId} location:`, rows[0]);
       res.json(rows[0]);
@@ -215,8 +241,8 @@ app.post('/register', upload, async (req, res) => {
   try {
     const { phone, password, name, role, vehicle_reg, addresses } = req.body;
     const roleInt = parseInt(role);
-    const profileUrl = req.files?.profileImage?.[0]?.url || null;
-    const vehicleUrl = req.files?.vehicleImage?.[0]?.url || null;
+    const profileUrl = req.files?.profileImage?.[0]?.secure_url || null;
+    const vehicleUrl = req.files?.vehicleImage?.[0]?.secure_url || null;
 
     console.log('Registering user:', { phone, name, roleInt, profileUrl, vehicleUrl });
 
@@ -355,7 +381,7 @@ app.post('/upload-pickup-image', orderUpload, async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { orderId, riderId } = req.body;
-    const fileUrl = req.file?.url;
+    const fileUrl = req.file?.secure_url;
 
     console.log('Uploading pickup image:', { orderId, riderId, fileUrl });
 
@@ -426,7 +452,7 @@ app.post('/upload-delivery-image', orderUpload, async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { orderId, riderId } = req.body;
-    const fileUrl = req.file?.url;
+    const fileUrl = req.file?.secure_url;
 
     console.log('Uploading delivery image:', { orderId, riderId, fileUrl });
 
@@ -760,7 +786,7 @@ app.post('/upload-order-image', orderUpload, async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { orderId, riderId } = req.body;
-    const fileUrl = req.file?.url;
+    const fileUrl = req.file?.secure_url;
 
     console.log('Uploading order image:', { orderId, riderId, fileUrl });
 
@@ -885,14 +911,30 @@ app.post('/create-order', (req, res, next) => {
   const stopwatch = Stopwatch();
   try {
     const { senderId, senderAddressId, receiverPhone, receiverAddressId, productDetails, status } = req.body;
-    const fileUrl = req.file?.url || req.file?.secure_url;
-    console.log('Received order data:', { senderId, senderAddressId, receiverPhone, receiverAddressId, productDetails, status, fileUrl });
+    const fileUrl = req.file?.secure_url; // ใช้ secure_url จาก Cloudinary
+
+    console.log('Received order data:', {
+      senderId,
+      senderAddressId,
+      receiverPhone,
+      receiverAddressId,
+      productDetails,
+      status,
+      file: req.file ? {
+        fieldname: req.file.fieldname,
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        secure_url: req.file.secure_url,
+      } : 'No file',
+    });
 
     if (!fileUrl) {
-      console.log('No file uploaded for order');
+      console.log('No file uploaded or Cloudinary failed to return secure_url');
       return res.status(400).json({ message: 'ต้องอัปโหลดรูปภาพสินค้า' });
     }
 
+    // ตรวจสอบว่ามีผู้รับในระบบ
     const [receiverRows] = await db.query('SELECT id, name FROM users WHERE phone = ?', [receiverPhone]);
     if (receiverRows.length === 0) {
       console.log('Receiver not found for phone:', receiverPhone);
@@ -900,19 +942,34 @@ app.post('/create-order', (req, res, next) => {
     }
     const receiverId = receiverRows[0].id;
 
+    // ตรวจสอบว่า senderAddressId และ receiverAddressId มีอยู่ในตาราง user_addresses
+    const [senderAddress] = await db.query('SELECT id FROM user_addresses WHERE id = ?', [senderAddressId]);
+    if (senderAddress.length === 0) {
+      console.log('Sender address not found:', senderAddressId);
+      return res.status(400).json({ message: 'ที่อยู่ผู้ส่งไม่ถูกต้อง' });
+    }
+
+    const [receiverAddress] = await db.query('SELECT id FROM user_addresses WHERE id = ?', [receiverAddressId]);
+    if (receiverAddress.length === 0) {
+      console.log('Receiver address not found:', receiverAddressId);
+      return res.status(400).json({ message: 'ที่อยู่ผู้รับไม่ถูกต้อง' });
+    }
+
+    // สร้างออเดอร์
     const [result] = await db.query(
       `INSERT INTO orders (sender_id, sender_address_id, receiver_id, receiver_address_id, product_details, product_image_url, status, rider_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
       [senderId, senderAddressId, receiverId, receiverAddressId, productDetails || '', fileUrl, status || 1]
     );
 
+    // ดึงข้อมูลออเดอร์ที่สร้าง
     const [orders] = await db.query(
       `SELECT o.*, 
               s.name AS senderName, 
               sa.id AS senderAddressId, sa.address_name AS senderAddressName, sa.address_detail AS senderAddressDetail, sa.latitude AS senderLat, sa.longitude AS senderLng,
               r.name AS receiverName, 
               r.phone AS receiverPhone, 
-              ra.id AS receiverAddressId, ra.address_name AS receiverAddressName, ra.address_detail AS receiverAddressDetail, ra.latitude AS  receiverLat, ra.longitude AS receiverLng
+              ra.id AS receiverAddressId, ra.address_name AS receiverAddressName, ra.address_detail AS receiverAddressDetail, ra.latitude AS receiverLat, ra.longitude AS receiverLng
        FROM orders o
        JOIN users s ON o.sender_id = s.id
        JOIN user_addresses sa ON o.sender_address_id = sa.id
@@ -945,11 +1002,30 @@ app.post('/create-order', (req, res, next) => {
     order.product_image_url = toFileUrl(order.product_image_url) || '';
     order.pickup_image_url = toFileUrl(order.pickup_image_url) || '';
     order.delivery_image_url = toFileUrl(order.delivery_image_url) || '';
-    console.log('Returning order:', JSON.stringify(order, null, 2));
+    console.log('Order created:', JSON.stringify(order, null, 2));
+
+    // ลบไฟล์ชั่วคราวถ้ามี
+    if (req.file?.path) {
+      try {
+        await fs.unlink(req.file.path);
+        console.log('Temporary file deleted:', req.file.path);
+      } catch (err) {
+        console.error('Error deleting temporary file:', err);
+      }
+    }
 
     res.status(200).json(order);
   } catch (err) {
     console.error('Create order error:', err);
+    // ลบไฟล์ชั่วคราวถ้ามี
+    if (req.file?.path) {
+      try {
+        await fs.unlink(req.file.path);
+        console.log('Temporary file deleted on error:', req.file.path);
+      } catch (err) {
+        console.error('Error deleting temporary file on error:', err);
+      }
+    }
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
   } finally {
     console.log('Create order response time:', stopwatch.elapsedMilliseconds, 'ms');
@@ -959,7 +1035,7 @@ app.post('/create-order', (req, res, next) => {
 // Update rider location
 app.post('/update-rider-location', async (req, res) => {
   const { riderId, latitude, longitude } = req.body;
-  
+
   try {
     await db.query(
       'INSERT INTO rider_locations (rider_id, latitude, longitude) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE latitude = VALUES(latitude), longitude = VALUES(longitude), updated_at = CURRENT_TIMESTAMP',
@@ -996,7 +1072,7 @@ app.get('/get-orders-receiver', async (req, res) => {
   try {
     const { userId } = req.query;
     console.log('Getting ALL receiver orders for map, userId:', userId);
-    
+
     const [rows] = await db.query(
       `SELECT 
          o.id, 
