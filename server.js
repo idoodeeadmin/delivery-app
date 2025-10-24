@@ -11,7 +11,6 @@ require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
-const wsPort = process.env.WS_PORT || 3001;
 
 // Cloudinary configuration
 cloudinary.config({
@@ -20,11 +19,10 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Multer configuration for Cloudinary with folder 'mobile_final'
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'mobile_final', // ตรงกับ Asset folder ที่ตั้งใน preset
+    folder: 'mobile_final',
     allowed_formats: ['jpg', 'png', 'jpeg'],
     public_id: (req, file) => `${file.fieldname}-${Date.now()}`,
     transformation: [
@@ -43,7 +41,7 @@ const db = mysql.createPool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   waitForConnections: true,
-  connectionLimit: 20,
+  connectionLimit: 10, // ลดลงเพื่อความเสถียร
   queueLimit: 50,
 });
 
@@ -52,13 +50,17 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// WebSocket server
-const wss = new WebSocket.Server({ port: wsPort });
+// WebSocket server (รวมกับ HTTP server)
+const server = app.listen(port, () => {
+  console.log(`Server running at http://0.0.0.0:${port}`);
+  console.log(`WebSocket server running at ws://0.0.0.0:${port}/ws`);
+});
+const wss = new WebSocket.Server({ server });
 const riderLocations = new Map();
 const clients = new Map();
 
 wss.on('connection', (ws, req) => {
-  const riderId = req.url.split('/').pop();
+  const riderId = req.url.split('/ws/')[1] || req.url.split('/').pop();
   console.log(`WebSocket connected for riderId: ${riderId}`);
   
   if (!clients.has(riderId)) {
@@ -111,6 +113,25 @@ const toFileUrl = (publicId) => {
     ],
   });
 };
+
+// Middleware สำหรับจัดการ Multer error
+const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    console.error('Multer error:', err);
+    return res.status(400).json({ message: 'ข้อผิดพลาดในการอัปโหลดไฟล์', error: err.message });
+  } else if (err) {
+    console.error('Unknown upload error:', err);
+    return res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
+  }
+  next();
+};
+
+// นำ middleware ไปใช้ใน endpoint ที่มีการอัปโหลด
+app.use('/register', handleMulterError);
+app.use('/create-order', handleMulterError);
+app.use('/upload-pickup-image', handleMulterError);
+app.use('/upload-delivery-image', handleMulterError);
+app.use('/upload-order-image', handleMulterError);
 
 // Get rider location
 app.get('/get-rider-location/:riderId', async (req, res) => {
@@ -186,6 +207,11 @@ app.post('/register', upload, async (req, res) => {
     const vehicleUrl = req.files?.vehicleImage?.[0]?.url || null;
 
     console.log('Registering user:', { phone, name, roleInt, profileUrl, vehicleUrl });
+
+    if (!phone || !password || !name || role === undefined) {
+      console.log('Missing required fields');
+      return res.status(400).json({ message: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+    }
 
     const [existingUsers] = await db.query('SELECT id FROM users WHERE phone = ?', [phone]);
     if (existingUsers.length > 0) {
@@ -635,7 +661,7 @@ app.get('/get-orders/available', async (req, res) => {
     }));
 
     console.log(`Fetched ${formattedRows.length} available orders`);
-    res.status(200).json(formattedRows);
+    res.json(formattedRows);
   } catch (err) {
     console.error('Get available orders error:', err);
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
@@ -1008,10 +1034,9 @@ app.get('/get-orders-receiver', async (req, res) => {
   }
 });
 
-// Start server
-app.listen(port, () => {
-  console.log(`Server running at http://0.0.0.0:${port}`);
-  console.log(`WebSocket server running at ws://0.0.0.0:${wsPort}`);
+// Health check endpoint for Render
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK' });
 });
 
 // Stopwatch utility
