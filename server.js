@@ -6,7 +6,6 @@ const path = require('path');
 const cors = require('cors');
 const WebSocket = require('ws');
 const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const multer = require('multer');
 const fs = require('fs').promises; // สำหรับจัดการไฟล์ชั่วคราว
 
@@ -26,46 +25,8 @@ if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !pr
   process.exit(1);
 }
 
-// Multer configuration
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: async (req, file) => {
-    console.log('Uploading file to Cloudinary:', {
-      fieldname: file.fieldname,
-      originalname: file.originalname,
-      size: file.size,
-      mimetype: file.mimetype,
-    });
-    return {
-      folder: 'mobile_final',
-      allowed_formats: ['jpg', 'png', 'jpeg'],
-      public_id: `${file.fieldname}-${Date.now()}`,
-      transformation: [
-        { width: 500, height: 500, crop: 'limit' },
-        { quality: 'auto', fetch_format: 'auto' },
-      ],
-    };
-  },
-});
-
-// Multer instances
-const upload = multer({ storage }).fields([{ name: 'profileImage' }, { name: 'vehicleImage' }]);
-const orderUpload = multer({
-  storage,
-  fileFilter: (req, file, cb) => {
-    console.log('File received in orderUpload:', {
-      fieldname: file.fieldname,
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-      size: file.size,
-    });
-    if (!file.mimetype.match(/image\/(jpeg|png)/)) {
-      return cb(new Error('เฉพาะไฟล์ .jpg และ .png เท่านั้น'), false);
-    }
-    cb(null, true);
-  },
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-}).single('productImage');
+// Multer configuration for temporary local storage
+const tempStorage = multer({ dest: 'uploads/' });
 
 // Database configuration
 const db = mysql.createPool({
@@ -90,7 +51,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // WebSocket server
 const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`Server جمعة at http://0.0.0.0:${port}`);
+  console.log(`Server running at http://0.0.0.0:${port}`);
   console.log(`WebSocket server running at ws://0.0.0.0:${port}/ws`);
 });
 const wss = new WebSocket.Server({ server });
@@ -236,13 +197,44 @@ app.post('/login', async (req, res) => {
 });
 
 // Register endpoint
-app.post('/register', upload, async (req, res) => {
+app.post('/register', tempStorage.fields([{ name: 'profileImage' }, { name: 'vehicleImage' }]), async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { phone, password, name, role, vehicle_reg, addresses } = req.body;
     const roleInt = parseInt(role);
-    const profileUrl = req.files?.profileImage?.[0]?.secure_url || null;
-    const vehicleUrl = req.files?.vehicleImage?.[0]?.secure_url || null;
+
+    let profileUrl = null;
+    let vehicleUrl = null;
+
+    // Upload profileImage if exists
+    if (req.files?.profileImage?.[0]) {
+      const profileFilePath = req.files.profileImage[0].path;
+      const profileResult = await cloudinary.uploader.upload(profileFilePath, {
+        folder: 'mobile_final',
+        allowed_formats: ['jpg', 'png', 'jpeg'],
+        transformation: [
+          { width: 500, height: 500, crop: 'limit' },
+          { quality: 'auto', fetch_format: 'auto' },
+        ],
+      });
+      profileUrl = profileResult.secure_url;
+      await fs.unlink(profileFilePath);
+    }
+
+    // Upload vehicleImage if exists
+    if (req.files?.vehicleImage?.[0]) {
+      const vehicleFilePath = req.files.vehicleImage[0].path;
+      const vehicleResult = await cloudinary.uploader.upload(vehicleFilePath, {
+        folder: 'mobile_final',
+        allowed_formats: ['jpg', 'png', 'jpeg'],
+        transformation: [
+          { width: 500, height: 500, crop: 'limit' },
+          { quality: 'auto', fetch_format: 'auto' },
+        ],
+      });
+      vehicleUrl = vehicleResult.secure_url;
+      await fs.unlink(vehicleFilePath);
+    }
 
     console.log('Registering user:', { phone, name, roleInt, profileUrl, vehicleUrl });
 
@@ -282,6 +274,13 @@ app.post('/register', upload, async (req, res) => {
     res.status(200).json({ userId: userResult.insertId, profileUrl, vehicleUrl });
   } catch (err) {
     console.error('Register error:', err);
+    // Clean up temp files on error
+    if (req.files?.profileImage?.[0]) {
+      await fs.unlink(req.files.profileImage[0].path).catch(() => {});
+    }
+    if (req.files?.vehicleImage?.[0]) {
+      await fs.unlink(req.files.vehicleImage[0].path).catch(() => {});
+    }
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
   } finally {
     console.log('Register response time:', stopwatch.elapsedMilliseconds, 'ms');
@@ -377,11 +376,28 @@ app.post('/update-order-status', async (req, res) => {
 });
 
 // Upload pickup image
-app.post('/upload-pickup-image', orderUpload, async (req, res) => {
+app.post('/upload-pickup-image', tempStorage.single('productImage'), async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { orderId, riderId } = req.body;
-    const fileUrl = req.file?.secure_url;
+    let fileUrl = null;
+
+    if (req.file) {
+      console.log('File received for pickup:', req.file);
+      const filePath = req.file.path;
+      const result = await cloudinary.uploader.upload(filePath, {
+        folder: 'mobile_final',
+        allowed_formats: ['jpg', 'png', 'jpeg'],
+        transformation: [
+          { width: 500, height: 500, crop: 'limit' },
+          { quality: 'auto', fetch_format: 'auto' },
+        ],
+      });
+      fileUrl = result.secure_url;
+      await fs.unlink(filePath);
+    } else {
+      return res.status(400).json({ message: 'ไม่มีรูปภาพจุดรับ' });
+    }
 
     console.log('Uploading pickup image:', { orderId, riderId, fileUrl });
 
@@ -441,6 +457,9 @@ app.post('/upload-pickup-image', orderUpload, async (req, res) => {
     res.status(200).json(order);
   } catch (err) {
     console.error('Upload pickup image error:', err);
+    if (req.file) {
+      await fs.unlink(req.file.path).catch(() => {});
+    }
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
   } finally {
     console.log('Upload pickup image response time:', stopwatch.elapsedMilliseconds, 'ms');
@@ -448,11 +467,28 @@ app.post('/upload-pickup-image', orderUpload, async (req, res) => {
 });
 
 // Upload delivery image
-app.post('/upload-delivery-image', orderUpload, async (req, res) => {
+app.post('/upload-delivery-image', tempStorage.single('productImage'), async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { orderId, riderId } = req.body;
-    const fileUrl = req.file?.secure_url;
+    let fileUrl = null;
+
+    if (req.file) {
+      console.log('File received for delivery:', req.file);
+      const filePath = req.file.path;
+      const result = await cloudinary.uploader.upload(filePath, {
+        folder: 'mobile_final',
+        allowed_formats: ['jpg', 'png', 'jpeg'],
+        transformation: [
+          { width: 500, height: 500, crop: 'limit' },
+          { quality: 'auto', fetch_format: 'auto' },
+        ],
+      });
+      fileUrl = result.secure_url;
+      await fs.unlink(filePath);
+    } else {
+      return res.status(400).json({ message: 'ไม่มีรูปภาพจุดส่ง' });
+    }
 
     console.log('Uploading delivery image:', { orderId, riderId, fileUrl });
 
@@ -512,6 +548,9 @@ app.post('/upload-delivery-image', orderUpload, async (req, res) => {
     res.status(200).json(order);
   } catch (err) {
     console.error('Upload delivery image error:', err);
+    if (req.file) {
+      await fs.unlink(req.file.path).catch(() => {});
+    }
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
   } finally {
     console.log('Upload delivery image response time:', stopwatch.elapsedMilliseconds, 'ms');
@@ -699,6 +738,7 @@ app.get('/get-orders/available', async (req, res) => {
     }));
 
     console.log(`Fetched ${formattedRows.length} available orders`);
+    console.log(JSON.stringify(formattedRows, null, 2));
     res.json(formattedRows);
   } catch (err) {
     console.error('Get available orders error:', err);
@@ -782,11 +822,28 @@ app.post('/accept-order', async (req, res) => {
 });
 
 // Upload order image
-app.post('/upload-order-image', orderUpload, async (req, res) => {
+app.post('/upload-order-image', tempStorage.single('productImage'), async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { orderId, riderId } = req.body;
-    const fileUrl = req.file?.secure_url;
+    let fileUrl = null;
+
+    if (req.file) {
+      console.log('File received for order image:', req.file);
+      const filePath = req.file.path;
+      const result = await cloudinary.uploader.upload(filePath, {
+        folder: 'mobile_final',
+        allowed_formats: ['jpg', 'png', 'jpeg'],
+        transformation: [
+          { width: 500, height: 500, crop: 'limit' },
+          { quality: 'auto', fetch_format: 'auto' },
+        ],
+      });
+      fileUrl = result.secure_url;
+      await fs.unlink(filePath);
+    } else {
+      return res.status(400).json({ message: 'ไม่มีรูปภาพ' });
+    }
 
     console.log('Uploading order image:', { orderId, riderId, fileUrl });
 
@@ -846,6 +903,9 @@ app.post('/upload-order-image', orderUpload, async (req, res) => {
     res.status(200).json(order);
   } catch (err) {
     console.error('Upload order image error:', err);
+    if (req.file) {
+      await fs.unlink(req.file.path).catch(() => {});
+    }
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
   } finally {
     console.log('Upload order image response time:', stopwatch.elapsedMilliseconds, 'ms');
@@ -896,22 +956,35 @@ app.get('/search-user-addresses', async (req, res) => {
 });
 
 // Create order
-app.post('/create-order', (req, res, next) => {
-  orderUpload(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      console.error('Multer error in create-order:', err);
-      return res.status(400).json({ message: `ข้อผิดพลาดในการอัปโหลดไฟล์: ${err.message}` });
-    } else if (err) {
-      console.error('Unknown upload error in create-order:', err);
-      return res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
-    }
-    next();
-  });
-}, async (req, res) => {
+app.post('/create-order', tempStorage.single('productImage'), async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { senderId, senderAddressId, receiverPhone, receiverAddressId, productDetails, status } = req.body;
-    const fileUrl = req.file?.secure_url; // ใช้ secure_url จาก Cloudinary
+    let fileUrl = null;
+
+    if (req.file) {
+      console.log('File received for create-order:', {
+        fieldname: req.file.fieldname,
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+      });
+      const filePath = req.file.path;
+      const result = await cloudinary.uploader.upload(filePath, {
+        folder: 'mobile_final',
+        allowed_formats: ['jpg', 'png', 'jpeg'],
+        transformation: [
+          { width: 500, height: 500, crop: 'limit' },
+          { quality: 'auto', fetch_format: 'auto' },
+        ],
+      });
+      fileUrl = result.secure_url;
+      await fs.unlink(filePath);
+      console.log('Cloudinary upload success:', { secure_url: fileUrl });
+    } else {
+      console.log('No file uploaded in create-order');
+      return res.status(400).json({ message: 'ต้องอัปโหลดรูปภาพสินค้า' });
+    }
 
     console.log('Received order data:', {
       senderId,
@@ -920,17 +993,10 @@ app.post('/create-order', (req, res, next) => {
       receiverAddressId,
       productDetails,
       status,
-      file: req.file ? {
-        fieldname: req.file.fieldname,
-        originalname: req.file.originalname,
-        mimetype: req.file.mimetype,
-        size: req.file.size,
-        secure_url: req.file.secure_url,
-      } : 'No file',
+      fileUrl,
     });
 
     if (!fileUrl) {
-      console.log('No file uploaded or Cloudinary failed to return secure_url');
       return res.status(400).json({ message: 'ต้องอัปโหลดรูปภาพสินค้า' });
     }
 
@@ -1004,27 +1070,11 @@ app.post('/create-order', (req, res, next) => {
     order.delivery_image_url = toFileUrl(order.delivery_image_url) || '';
     console.log('Order created:', JSON.stringify(order, null, 2));
 
-    // ลบไฟล์ชั่วคราวถ้ามี
-    if (req.file?.path) {
-      try {
-        await fs.unlink(req.file.path);
-        console.log('Temporary file deleted:', req.file.path);
-      } catch (err) {
-        console.error('Error deleting temporary file:', err);
-      }
-    }
-
     res.status(200).json(order);
   } catch (err) {
     console.error('Create order error:', err);
-    // ลบไฟล์ชั่วคราวถ้ามี
-    if (req.file?.path) {
-      try {
-        await fs.unlink(req.file.path);
-        console.log('Temporary file deleted on error:', req.file.path);
-      } catch (err) {
-        console.error('Error deleting temporary file on error:', err);
-      }
+    if (req.file) {
+      await fs.unlink(req.file.path).catch(() => {});
     }
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
   } finally {
@@ -1126,6 +1176,7 @@ app.get('/get-orders-receiver', async (req, res) => {
     }));
 
     console.log(`Found ${formattedRows.length} orders (status 1-4) for receiver ${userId}`);
+    console.log(JSON.stringify(formattedRows, null, 2));
     res.json(formattedRows);
   } catch (error) {
     console.error('Get receiver map orders error:', error);
