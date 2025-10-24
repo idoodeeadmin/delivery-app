@@ -21,14 +21,21 @@ cloudinary.config({
 
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
-  params: {
-    folder: 'mobile_final',
-    allowed_formats: ['jpg', 'png', 'jpeg'],
-    public_id: (req, file) => `${file.fieldname}-${Date.now()}`,
-    transformation: [
-      { width: 500, height: 500, crop: 'limit' },
-      { quality: 'auto', fetch_format: 'auto' },
-    ],
+  params: async (req, file) => {
+    console.log('Uploading file to Cloudinary:', {
+      filename: file.originalname,
+      size: file.size,
+      mimetype: file.mimetype,
+    });
+    return {
+      folder: 'mobile_final',
+      allowed_formats: ['jpg', 'png', 'jpeg'],
+      public_id: `${file.fieldname}-${Date.now()}`,
+      transformation: [
+        { width: 500, height: 500, crop: 'limit' },
+        { quality: 'auto', fetch_format: 'auto' },
+      ],
+    };
   },
 });
 const upload = multer({ storage }).fields([{ name: 'profileImage' }, { name: 'vehicleImage' }]);
@@ -41,17 +48,22 @@ const db = mysql.createPool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   waitForConnections: true,
-  connectionLimit: 10, // ลดลงเพื่อความเสถียร
+  connectionLimit: 10,
   queueLimit: 50,
 });
+
+// Test DB connection on startup
+db.getConnection()
+  .then(() => console.log('Connected to MySQL database'))
+  .catch(err => console.error('DB connection error:', err));
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// WebSocket server (รวมกับ HTTP server)
-const server = app.listen(port, () => {
+// WebSocket server
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Server running at http://0.0.0.0:${port}`);
   console.log(`WebSocket server running at ws://0.0.0.0:${port}/ws`);
 });
@@ -114,7 +126,7 @@ const toFileUrl = (publicId) => {
   });
 };
 
-// Middleware สำหรับจัดการ Multer error
+// Multer error handling middleware
 const handleMulterError = (err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     console.error('Multer error:', err);
@@ -126,7 +138,7 @@ const handleMulterError = (err, req, res, next) => {
   next();
 };
 
-// นำ middleware ไปใช้ใน endpoint ที่มีการอัปโหลด
+// Apply multer error handling to upload endpoints
 app.use('/register', handleMulterError);
 app.use('/create-order', handleMulterError);
 app.use('/upload-pickup-image', handleMulterError);
@@ -858,11 +870,22 @@ app.get('/search-user-addresses', async (req, res) => {
 });
 
 // Create order
-app.post('/create-order', orderUpload, async (req, res) => {
+app.post('/create-order', (req, res, next) => {
+  orderUpload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      console.error('Multer error in create-order:', err);
+      return res.status(400).json({ message: `ข้อผิดพลาดในการอัปโหลดไฟล์: ${err.message}` });
+    } else if (err) {
+      console.error('Unknown upload error in create-order:', err);
+      return res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   const stopwatch = Stopwatch();
   try {
     const { senderId, senderAddressId, receiverPhone, receiverAddressId, productDetails, status } = req.body;
-    const fileUrl = req.file?.url;
+    const fileUrl = req.file?.url || req.file?.secure_url;
     console.log('Received order data:', { senderId, senderAddressId, receiverPhone, receiverAddressId, productDetails, status, fileUrl });
 
     if (!fileUrl) {
@@ -889,7 +912,7 @@ app.post('/create-order', orderUpload, async (req, res) => {
               sa.id AS senderAddressId, sa.address_name AS senderAddressName, sa.address_detail AS senderAddressDetail, sa.latitude AS senderLat, sa.longitude AS senderLng,
               r.name AS receiverName, 
               r.phone AS receiverPhone, 
-              ra.id AS receiverAddressId, ra.address_name AS receiverAddressName, ra.address_detail AS receiverAddressDetail, ra.latitude AS receiverLat, ra.longitude AS receiverLng
+              ra.id AS receiverAddressId, ra.address_name AS receiverAddressName, ra.address_detail AS receiverAddressDetail, ra.latitude AS  receiverLat, ra.longitude AS receiverLng
        FROM orders o
        JOIN users s ON o.sender_id = s.id
        JOIN user_addresses sa ON o.sender_address_id = sa.id
