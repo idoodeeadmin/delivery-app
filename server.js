@@ -874,6 +874,56 @@ app.post('/api/accept-order', async (req, res) => {
     console.log('Accept order response time:', stopwatch.elapsedMilliseconds, 'ms');
   }
 });
+app.get('/api/get-orders-rider/:riderId', async (req, res) => {
+  const stopwatch = Stopwatch();
+  try {
+    const { riderId } = req.params;
+    console.log('Fetching orders for rider:', riderId);
+
+    const [rows] = await db.query(
+      `SELECT o.*, 
+              sa.id AS senderAddressId, sa.address_name AS senderAddressName, sa.address_detail AS senderAddressDetail, sa.latitude AS senderLat, sa.longitude AS senderLng,
+              ra.id AS receiverAddressId, ra.address_name AS receiverAddressName, ra.address_detail AS receiverAddressDetail, ra.latitude AS receiverLat, ra.longitude AS receiverLng,
+              r.name AS receiverName, r.phone AS receiverPhone
+       FROM orders o
+       JOIN user_addresses sa ON o.sender_address_id = sa.id
+       JOIN user_addresses ra ON o.receiver_address_id = ra.id
+       JOIN users r ON o.receiver_id = r.id
+       WHERE o.rider_id = ? AND o.status IN (1, 2, 3, 4)
+       ORDER BY o.created_at DESC`,
+      [riderId]
+    );
+
+    const formattedRows = rows.map(row => ({
+      ...row,
+      senderAddress: {
+        id: row.senderAddressId,
+        address_name: row.senderAddressName || 'ไม่ระบุ',
+        address_detail: row.senderAddressDetail || 'ไม่มีข้อมูล',
+        latitude: parseFloat(row.senderLat) || 0.0,
+        longitude: parseFloat(row.senderLng) || 0.0,
+      },
+      receiverAddress: {
+        id: row.receiverAddressId,
+        address_name: row.receiverAddressName || 'ไม่ระบุ',
+        address_detail: row.receiverAddressDetail || 'ไม่มีข้อมูล',
+        latitude: parseFloat(row.receiverLat) || 0.0,
+        longitude: parseFloat(row.receiverLng) || 0.0,
+      },
+      product_image_url: toFileUrl(row.product_image_url) || '',
+      pickup_image_url: toFileUrl(row.pickup_image_url) || '',
+      delivery_image_url: toFileUrl(row.delivery_image_url) || '',
+    }));
+
+    console.log(`Fetched ${formattedRows.length} orders for rider ${riderId}`);
+    res.status(200).json(formattedRows);
+  } catch (err) {
+    console.error('Get rider orders error:', err);
+    res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
+  } finally {
+    console.log('Get rider orders response time:', stopwatch.elapsedMilliseconds, 'ms');
+  }
+});
 
 // Upload order image
 app.post('/upload-order-image', tempStorage.single('productImage'), async (req, res) => {
