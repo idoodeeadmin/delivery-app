@@ -765,7 +765,6 @@ app.get('/get-users', async (req, res) => {
   }
 });
 
-
 // Accept order
 app.post('/accept-order', async (req, res) => {
   const stopwatch = Stopwatch();
@@ -976,11 +975,10 @@ app.get('/search-user-addresses', async (req, res) => {
 });
 
 // Create order
-// Create order
 app.post('/create-order', tempStorage.single('productImage'), async (req, res) => {
   const stopwatch = Stopwatch();
   try {
-    const { senderId, senderAddressId, receiverId, receiverAddressId, productDetails, status } = req.body;
+    const { senderId, senderAddressId, receiverPhone, receiverAddressId, productDetails, status } = req.body;
     let fileUrl = null;
 
     if (req.file) {
@@ -1010,54 +1008,52 @@ app.post('/create-order', tempStorage.single('productImage'), async (req, res) =
     console.log('Received order data:', {
       senderId,
       senderAddressId,
-      receiverId,
+      receiverPhone,
       receiverAddressId,
       productDetails,
       status,
       fileUrl,
     });
 
-    if (!senderId || !senderAddressId || !receiverId || !receiverAddressId || !productDetails || !fileUrl) {
-      console.log('Missing required fields');
-      return res.status(400).json({ message: 'ต้องระบุข้อมูลให้ครบถ้วน' });
+    if (!fileUrl) {
+      return res.status(400).json({ message: 'ต้องอัปโหลดรูปภาพสินค้า' });
     }
 
-    // Validate receiverId
-    const [receiverRows] = await db.query('SELECT id, name, phone FROM users WHERE id = ? AND role = 0', [receiverId]);
+    // ตรวจสอบว่ามีผู้รับในระบบ
+    const [receiverRows] = await db.query('SELECT id, name FROM users WHERE phone = ?', [receiverPhone]);
     if (receiverRows.length === 0) {
-      console.log('Receiver not found for id:', receiverId);
+      console.log('Receiver not found for phone:', receiverPhone);
       return res.status(404).json({ message: 'ไม่พบผู้รับ' });
     }
-    const receiver = receiverRows[0];
+    const receiverId = receiverRows[0].id;
 
-    // Validate senderAddressId and receiverAddressId
-    const [senderAddress] = await db.query('SELECT id FROM user_addresses WHERE id = ? AND user_id = ?', [senderAddressId, senderId]);
+    // ตรวจสอบว่า senderAddressId และ receiverAddressId มีอยู่ในตาราง user_addresses
+    const [senderAddress] = await db.query('SELECT id FROM user_addresses WHERE id = ?', [senderAddressId]);
     if (senderAddress.length === 0) {
       console.log('Sender address not found:', senderAddressId);
       return res.status(400).json({ message: 'ที่อยู่ผู้ส่งไม่ถูกต้อง' });
     }
 
-    const [receiverAddress] = await db.query('SELECT id FROM user_addresses WHERE id = ? AND user_id = ?', [receiverAddressId, receiverId]);
+    const [receiverAddress] = await db.query('SELECT id FROM user_addresses WHERE id = ?', [receiverAddressId]);
     if (receiverAddress.length === 0) {
       console.log('Receiver address not found:', receiverAddressId);
       return res.status(400).json({ message: 'ที่อยู่ผู้รับไม่ถูกต้อง' });
     }
 
-    // Create order
+    // สร้างออเดอร์
     const [result] = await db.query(
       `INSERT INTO orders (sender_id, sender_address_id, receiver_id, receiver_address_id, product_details, product_image_url, status, rider_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
       [senderId, senderAddressId, receiverId, receiverAddressId, productDetails || '', fileUrl, status || 1]
     );
 
-    // Fetch created order
+    // ดึงข้อมูลออเดอร์ที่สร้าง
     const [orders] = await db.query(
       `SELECT o.*, 
               s.name AS senderName, 
               sa.id AS senderAddressId, sa.address_name AS senderAddressName, sa.address_detail AS senderAddressDetail, sa.latitude AS senderLat, sa.longitude AS senderLng,
               r.name AS receiverName, 
               r.phone AS receiverPhone, 
-              r.profile_image_url AS receiverImageUrl,
               ra.id AS receiverAddressId, ra.address_name AS receiverAddressName, ra.address_detail AS receiverAddressDetail, ra.latitude AS receiverLat, ra.longitude AS receiverLng
        FROM orders o
        JOIN users s ON o.sender_id = s.id
@@ -1091,7 +1087,6 @@ app.post('/create-order', tempStorage.single('productImage'), async (req, res) =
     order.product_image_url = toFileUrl(order.product_image_url) || '';
     order.pickup_image_url = toFileUrl(order.pickup_image_url) || '';
     order.delivery_image_url = toFileUrl(order.delivery_image_url) || '';
-    order.receiverImageUrl = toFileUrl(order.receiverImageUrl) || '';
     console.log('Order created:', JSON.stringify(order, null, 2));
 
     res.status(200).json(order);
