@@ -766,34 +766,63 @@ app.get('/get-users', async (req, res) => {
 });
 
 // Accept order
-app.post('/accept-order', async (req, res) => {
+app.post('/api/accept-order', async (req, res) => {
   const stopwatch = Stopwatch();
+  let connection;
   try {
     const { orderId, riderId } = req.body;
     console.log('Accepting order:', { orderId, riderId });
 
+    // ตรวจสอบว่า orderId และ riderId มีอยู่
     if (!orderId || !riderId) {
       console.log('Missing orderId or riderId');
       return res.status(400).json({ message: 'ต้องระบุ orderId และ riderId' });
     }
 
-    const [rows] = await db.query('SELECT * FROM orders WHERE id = ? AND status = 1 AND rider_id IS NULL', [orderId]);
-    if (rows.length === 0) {
-      console.log('Order not available or already taken:', orderId);
-      return res.status(400).json({ message: 'ออเดอร์นี้ไม่สามารถรับได้หรือถูกรับไปแล้ว' });
+    // ได้ connection จาก pool และเริ่ม transaction
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // ตรวจสอบว่า rider มีงานที่กำลังดำเนินการ (status 2 หรือ 3)
+    const [activeOrders] = await connection.query(
+      'SELECT id FROM orders WHERE rider_id = ? AND status IN (2, 3)',
+      [riderId]
+    );
+    if (activeOrders.length > 0) {
+      console.log('Rider has active order:', riderId);
+      await connection.rollback();
+      return res.status(400).json({ 
+        message: 'คุณมีงานที่กำลังดำเนินการอยู่ กรุณาเสร็จสิ้นงานก่อนรับงานใหม่' 
+      });
     }
 
-    const [result] = await db.query(
+    // ตรวจสอบว่า order พร้อมรับ (status = 1 และไม่มี rider)
+    const [rows] = await connection.query(
+      'SELECT * FROM orders WHERE id = ? AND status = 1 AND rider_id IS NULL',
+      [orderId]
+    );
+    if (rows.length === 0) {
+      console.log('Order not available or already taken:', orderId);
+      await connection.rollback();
+      return res.status(400).json({ 
+        message: 'ออเดอร์นี้ไม่สามารถรับได้หรือถูกรับไปแล้ว' 
+      });
+    }
+
+    // อัปเดต order
+    const [result] = await connection.query(
       'UPDATE orders SET rider_id = ?, status = 2 WHERE id = ?',
       [riderId, orderId]
     );
 
     if (result.affectedRows === 0) {
       console.log('Failed to update order:', orderId);
+      await connection.rollback();
       return res.status(400).json({ message: 'ไม่สามารถอัปเดตออเดอร์ได้' });
     }
 
-    const [updatedRows] = await db.query(
+    // ดึงข้อมูล order ที่อัปเดตแล้ว
+    const [updatedRows] = await connection.query(
       `SELECT o.*, 
               sa.id AS senderAddressId, sa.address_name AS senderAddressName, sa.address_detail AS senderAddressDetail, sa.latitude AS senderLat, sa.longitude AS senderLng,
               ra.id AS receiverAddressId, ra.address_name AS receiverAddressName, ra.address_detail AS receiverAddressDetail, ra.latitude AS receiverLat, ra.longitude AS receiverLng,
@@ -808,9 +837,11 @@ app.post('/accept-order', async (req, res) => {
 
     if (updatedRows.length === 0) {
       console.log('Failed to fetch updated order:', orderId);
+      await connection.rollback();
       return res.status(500).json({ message: 'ไม่สามารถดึงข้อมูลออเดอร์ที่อัปเดตได้' });
     }
 
+    // แปลงข้อมูลให้ตรงกับโครงสร้างที่ Flutter คาดหวัง
     const order = updatedRows[0];
     order.senderAddress = {
       id: order.senderAddressId,
@@ -831,11 +862,15 @@ app.post('/accept-order', async (req, res) => {
     order.delivery_image_url = toFileUrl(order.delivery_image_url) || '';
     console.log('Order accepted:', JSON.stringify(order, null, 2));
 
+    // Commit transaction
+    await connection.commit();
     res.status(200).json(order);
   } catch (err) {
     console.error('Accept order error:', err);
+    if (connection) await connection.rollback();
     res.status(500).json({ message: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์', error: err.message });
   } finally {
+    if (connection) connection.release();
     console.log('Accept order response time:', stopwatch.elapsedMilliseconds, 'ms');
   }
 });
